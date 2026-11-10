@@ -203,7 +203,7 @@ export function makeScryfall({ headers = { Accept: 'application/json' }, delay =
   }
 
   // Every paper printing of a card, newest first (follows Scryfall's pagination)
-  async function printings(card) {
+  async function printings(card, onPage) {
     const oid = card.oracle_id || (card.card_faces && card.card_faces[0] && card.card_faces[0].oracle_id);
     const q = oid ? `oracleid:${oid} include:extras game:paper` : `!"${card.name}" include:extras game:paper`;
     let url = API + '/cards/search?unique=prints&order=released&dir=desc&q=' + encodeURIComponent(q), out = [];
@@ -213,6 +213,7 @@ export function makeScryfall({ headers = { Accept: 'application/json' }, delay =
       const j = await r.json();
       out = out.concat(j.data || []);
       url = j.has_more ? j.next_page : null;
+      if (url && onPage) onPage(out);
     }
     return out;
   }

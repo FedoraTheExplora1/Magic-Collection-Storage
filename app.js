@@ -1,4 +1,4 @@
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 import { parseInput, makeScryfall, resolveItems, findAlts, cardRow, priceRow, priceFrom, hasAllPrices, todayUTC } from './js/core.js';
 
@@ -66,15 +66,27 @@ async function upsertChunks(table, rows, onConflict, size = 500) {
 }
 async function loadCards(ids) {
   const need = [...new Set(ids)].filter(id => id && !state.cards.has(id));
-  for (const c of chunk(need, 120)) {
+  await pmap(chunk(need, 120), async c => {
     for (const row of await must(sb.from('cards').select('*').in('id', c))) state.cards.set(row.id, row);
-  }
+  });
 }
 const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+
+// run fn over items with limited parallelism
+async function pmap(items, fn, n = 6) {
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k]); }
+  }));
+  return out;
+}
 
 async function loadRate() {
   const rows = await must(sb.from('fx_rates').select('*').order('date', { ascending: false }).limit(1));
   if (rows.length) { state.rate = +rows[0].aud_per_usd; state.rateDate = rows[0].date; return; }
+  await liveRate();
+}
+async function liveRate() {
   for (const u of ['https://api.frankfurter.dev/v1/latest?base=USD&symbols=AUD', 'https://api.frankfurter.app/latest?from=USD&to=AUD']) {
     try { const j = await (await fetch(u)).json(); if (j.rates && j.rates.AUD) { state.rate = j.rates.AUD; state.rateDate = j.date; return; } } catch (e) {}
   }
@@ -88,23 +100,43 @@ async function loadPast() {
   if (!d.length) return;
   state.pastDate = d[0].date;
   const ids = [...new Set(state.entries.flatMap(e => { const c = state.cards.get(e.card_id); return [e.card_id, c && c.alt_id]; }).filter(Boolean))];
-  for (const c of chunk(ids, 120)) {
+  await pmap(chunk(ids, 120), async c => {
     const rows = await must(sb.from('price_history').select('card_id,usd,usd_foil,usd_etched,eur,eur_foil,eur_etched').eq('date', state.pastDate).in('card_id', c));
     for (const r of rows) state.past.set(r.card_id, r);
-  }
+  });
 }
 
+// Fast path: one request via the collection_snapshot() database function.
+// Falls back to the older multi-request loader if the function hasn't been added yet.
+let useRpc = true;
 async function loadAll() {
-  $('#lastUpdated').textContent = 'Loading…';
+  if (!state.entries.length) $('#lastUpdated').textContent = 'Loading your collection…';
   try {
-    state.entries = await fetchAll(() => sb.from('collection').select('id,card_id,finish,quantity,added_at').order('id'));
-    await loadCards(state.entries.map(e => e.card_id));
-    await loadCards([...state.cards.values()].map(c => c.alt_id));
-    await Promise.all([
-      loadRate(),
-      loadPast(),
-      fetchAll(() => sb.from('value_snapshots').select('date,value_usd,value_eur,value_aud,card_count').order('date')).then(s => state.snapshots = s)
-    ]);
+    let data = null;
+    if (useRpc) {
+      const r = await sb.rpc('collection_snapshot');
+      if (r.error) {
+        if (r.error.code === 'PGRST202' || /collection_snapshot/.test(r.error.message || '')) { useRpc = false; console.info('collection_snapshot() not found, using slower loader. Re-run supabase/schema.sql to speed this up.'); }
+        else throw r.error;
+      } else data = r.data;
+    }
+    if (data) {
+      state.entries = data.entries || [];
+      state.cards = new Map((data.cards || []).map(c => [c.id, c]));
+      state.pastDate = data.past_date || null;
+      state.past = new Map((data.past || []).map(p => [p.card_id, p]));
+      state.snapshots = data.snapshots || [];
+      if (data.fx) { state.rate = +data.fx.aud_per_usd; state.rateDate = data.fx.date; } else await liveRate();
+    } else {
+      state.cards = new Map();
+      state.entries = await fetchAll(() => sb.from('collection').select('id,card_id,finish,quantity,added_at').order('id'));
+      const snaps = fetchAll(() => sb.from('value_snapshots').select('date,value_usd,value_eur,value_aud,card_count').order('date'));
+      const rate = loadRate();
+      await loadCards(state.entries.map(e => e.card_id));
+      await loadCards([...state.cards.values()].map(c => c.alt_id));
+      await loadPast();
+      state.snapshots = await snaps; await rate;
+    }
     render();
   } catch (e) {
     console.error(e);
@@ -140,70 +172,101 @@ const COLS = [
   ['unit', 'Each', 'num'], ['delta', 'Change', 'num'], ['total', 'Total', 'num'], ['', '', 'nosort']
 ];
 
-function rows() {
-  return state.entries.map(e => {
-    const c = state.cards.get(e.card_id), now = unitPrice(e), then = unitPrice(e, true);
-    return { e, c, now, unit: now ? now.v : null, total: now ? now.v * e.quantity : null,
-      // only compare like with like (same finish, same printing) so a missing foil price last week doesn't fake a jump
-      delta: now && then && now.usedFinish === then.usedFinish && (now.via && now.via.id) === (then.via && then.via.id) ? now.v - then.v : null };
-  }).filter(r => r.c);
+function rowFor(e) {
+  const c = state.cards.get(e.card_id); if (!c) return null;
+  const now = unitPrice(e), then = unitPrice(e, true);
+  return { e, c, now, unit: now ? now.v : null, total: now ? now.v * e.quantity : null,
+    // only compare like with like (same finish, same printing) so a missing foil price last week doesn't fake a jump
+    delta: now && then && now.usedFinish === then.usedFinish && (now.via && now.via.id) === (then.via && then.via.id) ? now.v - then.v : null };
 }
+const rows = () => state.entries.map(rowFor).filter(Boolean);
 
-function render() {
+// what = which parts to redraw: stats / table / chart (default: all)
+function render(what = { stats: true, table: true, chart: true }) {
   $('#currency').value = state.currency;
   $('#useAlt').checked = state.useAlt;
-  $('#rateText').textContent = state.rate ? `1 USD = ${state.rate.toFixed(4)} AUD${state.rateDate ? ', ' + state.rateDate : ''}` : '…';
-  const updated = [...state.cards.values()].reduce((m, c) => c.updated_at > m ? c.updated_at : m, '');
-  $('#lastUpdated').textContent = updated ? 'Prices last updated ' + new Date(updated).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : 'No cards yet';
+  $('#emptyMsg').hidden = state.entries.length > 0;
+  $('.tablewrap').hidden = state.entries.length === 0;
+  if (!state.entries.length) $('#importPanel').open = true;
+  if (what.stats) renderStats();
+  if (what.table) renderTable();
+  if (what.chart) renderChart();
+}
 
-  const all = rows();
-  // stats
-  const total = all.reduce((s, r) => s + (r.total || 0), 0);
+function renderStats(all = rows()) {
+  $('#rateText').textContent = state.rate ? `1 USD = ${state.rate.toFixed(4)} AUD${state.rateDate ? ', ' + state.rateDate : ''}` : '…';
+  let updated = ''; for (const c of state.cards.values()) if (c.updated_at > updated) updated = c.updated_at;
+  $('#lastUpdated').textContent = updated ? 'Prices last updated ' + new Date(updated).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }) : 'No cards yet';
+  let total = 0, cards = 0, d = 0, prev = 0;
+  for (const r of all) {
+    total += r.total || 0; cards += r.e.quantity;
+    if (r.delta != null) { d += r.delta * r.e.quantity; prev += (r.unit - r.delta) * r.e.quantity; }
+  }
   $('#sTotal').textContent = money(total);
-  $('#sCards').textContent = state.entries.reduce((s, e) => s + e.quantity, 0).toLocaleString();
+  $('#sCards').textContent = cards.toLocaleString();
   $('#sUnique').textContent = state.entries.length.toLocaleString();
   if (state.pastDate) {
-    const both = all.filter(r => r.delta != null);
-    const d = both.reduce((s, r) => s + r.delta * r.e.quantity, 0);
-    const prev = both.reduce((s, r) => s + (r.unit - r.delta) * r.e.quantity, 0);
     $('#sChangeLabel').textContent = 'Change since ' + fmtDate(state.pastDate);
     $('#sChange').innerHTML = `<span class="${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${signed(d)}</span>` +
       (prev ? ` <span class="note">${(d / prev * 100).toFixed(1)}%</span>` : '');
   } else { $('#sChangeLabel').textContent = 'Change'; $('#sChange').innerHTML = '<span class="note">after first daily update</span>'; }
+}
 
-  // table
+// The table is drawn in pages of PAGE rows; more are added as you scroll down.
+const PAGE = 150;
+let tableRows = [], shown = 0;
+function renderTable() {
   $('#thead').innerHTML = COLS.map(([k, label, cls]) =>
     `<th data-k="${k}" class="${cls}">${label}${k && state.sortKey === k ? ' <span class="arrow">' + (state.sortDir < 0 ? '▼' : '▲') + '</span>' : ''}</th>`).join('');
-  const f = state.filter.toLowerCase();
-  let list = f ? all.filter(r => (r.c.name + ' ' + r.c.set_code + ' ' + r.c.set_name).toLowerCase().includes(f)) : all;
+  const f = state.filter.trim().toLowerCase();
+  let list = rows();
+  if (f) list = list.filter(r => (r.c.name + ' ' + r.c.set_code + ' ' + r.c.set_name).toLowerCase().includes(f));
   const k = state.sortKey, dir = state.sortDir;
   const val = r => ({ qty: r.e.quantity, name: r.c.name, set: r.c.set_name || '', cn: parseFloat(r.c.collector_number) || 0,
     finish: r.e.finish, unit: r.unit ?? -Infinity, delta: r.delta ?? -Infinity, total: r.total ?? -Infinity })[k];
   list.sort((a, b) => { const x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : 0) * dir || a.c.name.localeCompare(b.c.name); });
+  tableRows = list; shown = 0;
+  $('#tbody').innerHTML = list.length || !state.entries.length ? '' : '<tr><td colspan="9" class="muted">No matches for that filter.</td></tr>';
+  appendRows();
+}
+function appendRows() {
+  const next = tableRows.slice(shown, shown + PAGE);
+  if (next.length) $('#tbody').insertAdjacentHTML('beforeend', next.map(rowHtml).join(''));
+  shown += next.length;
+  const more = $('#more');
+  more.hidden = shown >= tableRows.length;
+  more.textContent = `Showing ${shown.toLocaleString()} of ${tableRows.length.toLocaleString()}. Scroll for more`;
+}
+new IntersectionObserver(es => { if (es.some(e => e.isIntersecting) && shown < tableRows.length) appendRows(); }, { rootMargin: '800px' }).observe($('#more'));
 
-  $('#tbody').innerHTML = list.map(r => {
-    const { e, c, now } = r;
-    const notes = (now && now.via ? `<span class="fb via" title="This printing has no price; using the ${esc(c.alt_note || 'printing ' + now.via.set_code.toUpperCase() + ' #' + now.via.collector_number)}">(via ${esc(now.via.set_code.toUpperCase())} #${esc(now.via.collector_number)})</span>` : '') +
-      (now && now.usedFinish !== e.finish ? `<span class="fb" title="No ${e.finish} price listed, showing ${now.usedFinish} price">(${now.usedFinish} price)</span>` : '');
-    const delta = r.delta == null || Math.abs(r.delta) < 0.005 ? '<span class="muted">—</span>'
-      : `<span class="delta ${r.delta > 0 ? 'up' : 'down'}">${signed(r.delta)}</span>`;
-    return `<tr data-id="${e.id}" data-img="${esc(c.image_url || '')}">
-      <td class="num"><input class="qty" type="number" min="0" value="${e.quantity}" title="Change quantity (0 removes it)"></td>
-      <td class="name"><span class="dot r-${esc(c.rarity)}"></span><a href="${esc(c.scryfall_uri)}" target="_blank" rel="noopener">${esc(c.name)}</a></td>
-      <td><button class="printing" title="Change printing or finish">${esc((c.set_code || '').toUpperCase())} <span class="muted">${esc(c.set_name)}</span><span class="pen">✎</span></button></td>
-      <td class="muted">${esc(c.collector_number)}</td>
-      <td>${e.finish === 'nonfoil' ? '<span class="badge">normal</span>' : `<span class="badge ${e.finish}">${e.finish}</span>`}</td>
-      <td class="num">${money(r.unit)}${notes}</td>
-      <td class="num">${delta}</td>
-      <td class="num"><strong>${money(r.total)}</strong></td>
-      <td><button class="del" title="Remove from collection">×</button></td>
-    </tr>`;
-  }).join('') || (state.entries.length ? '<tr><td colspan="9" class="muted">No matches for that filter.</td></tr>' : '');
-  $('#emptyMsg').hidden = state.entries.length > 0;
-  $('.tablewrap').hidden = state.entries.length === 0;
-  if (!state.entries.length) $('#importPanel').open = true;
-
-  renderChart();
+function rowHtml(r) {
+  const { e, c, now } = r;
+  const notes = (now && now.via ? `<span class="fb via" title="This printing has no price; using the ${esc(c.alt_note || 'printing ' + now.via.set_code.toUpperCase() + ' #' + now.via.collector_number)}">(via ${esc(now.via.set_code.toUpperCase())} #${esc(now.via.collector_number)})</span>` : '') +
+    (now && now.usedFinish !== e.finish ? `<span class="fb" title="No ${e.finish} price listed, showing ${now.usedFinish} price">(${now.usedFinish} price)</span>` : '');
+  const delta = r.delta == null || Math.abs(r.delta) < 0.005 ? '<span class="muted">—</span>'
+    : `<span class="delta ${r.delta > 0 ? 'up' : 'down'}">${signed(r.delta)}</span>`;
+  return `<tr data-id="${e.id}" data-img="${esc(c.image_url || '')}">
+    <td class="num"><input class="qty" type="number" min="0" value="${e.quantity}" title="Change quantity (0 removes it)"></td>
+    <td class="name"><span class="dot r-${esc(c.rarity)}"></span><a href="${esc(c.scryfall_uri)}" target="_blank" rel="noopener">${esc(c.name)}</a></td>
+    <td><button class="printing" title="Change printing or finish">${esc((c.set_code || '').toUpperCase())} <span class="muted">${esc(c.set_name)}</span><span class="pen">✎</span></button></td>
+    <td class="muted">${esc(c.collector_number)}</td>
+    <td>${e.finish === 'nonfoil' ? '<span class="badge">normal</span>' : `<span class="badge ${e.finish}">${e.finish}</span>`}</td>
+    <td class="num">${money(r.unit)}${notes}</td>
+    <td class="num">${delta}</td>
+    <td class="num"><strong>${money(r.total)}</strong></td>
+    <td><button class="del" title="Remove from collection">×</button></td>
+  </tr>`;
+}
+// redraw a single row in place (after a quantity change)
+function updateRow(e) {
+  const tr = $(`#tbody tr[data-id="${e.id}"]`), r = rowFor(e);
+  if (tr && r) tr.outerHTML = rowHtml(r);
+}
+function removeRow(id) {
+  const tr = $(`#tbody tr[data-id="${id}"]`); if (tr) tr.remove();
+  const i = tableRows.findIndex(r => r.e.id === id);
+  if (i !== -1) { tableRows.splice(i, 1); if (i < shown) shown--; }
+  appendRows();
 }
 
 // ---------- chart ----------
@@ -254,38 +317,43 @@ $('#thead').addEventListener('click', e => {
   const k = th.dataset.k;
   if (state.sortKey === k) state.sortDir *= -1;
   else { state.sortKey = k; state.sortDir = ['qty', 'unit', 'delta', 'total'].includes(k) ? -1 : 1; }
-  render();
+  render({ table: true });
 });
-$('#filter').addEventListener('input', e => { state.filter = e.target.value; render(); });
+let filterTimer;
+$('#filter').addEventListener('input', e => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => { state.filter = e.target.value; render({ table: true }); }, 120);
+});
 $('#currency').addEventListener('change', e => { state.currency = e.target.value; savePref('mcs.currency', state.currency); render(); });
-$('#useAlt').addEventListener('change', e => { state.useAlt = e.target.checked; savePref('mcs.useAlt', state.useAlt ? '1' : '0'); render(); });
+$('#useAlt').addEventListener('change', e => { state.useAlt = e.target.checked; savePref('mcs.useAlt', state.useAlt ? '1' : '0'); render({ stats: true, table: true }); });
 
+// Quantity edits and deletes update the screen immediately, then save in the background (undone if the save fails).
+async function removeEntry(entry) {
+  const i = state.entries.indexOf(entry);
+  state.entries.splice(i, 1); removeRow(entry.id); render({ stats: true });
+  try { await must(sb.from('collection').delete().eq('id', entry.id)); }
+  catch (err) { state.entries.splice(i, 0, entry); render({ stats: true, table: true }); toast('Delete failed: ' + err.message); }
+}
 $('#tbody').addEventListener('change', async e => {
   if (!e.target.classList.contains('qty')) return;
   const id = +e.target.closest('tr').dataset.id, q = parseInt(e.target.value, 10);
   const entry = state.entries.find(x => x.id === id); if (!entry || isNaN(q)) return;
-  try {
-    if (q <= 0) {
-      if (!confirm(`Remove ${state.cards.get(entry.card_id).name} from your collection?`)) { e.target.value = entry.quantity; return; }
-      await must(sb.from('collection').delete().eq('id', id));
-      state.entries = state.entries.filter(x => x.id !== id);
-    } else {
-      await must(sb.from('collection').update({ quantity: q }).eq('id', id));
-      entry.quantity = q;
-    }
-    render();
-  } catch (err) { toast('Save failed: ' + err.message); e.target.value = entry.quantity; }
+  if (q <= 0) {
+    if (confirm(`Remove ${state.cards.get(entry.card_id).name} from your collection?`)) removeEntry(entry);
+    else e.target.value = entry.quantity;
+    return;
+  }
+  const old = entry.quantity; if (q === old) return;
+  entry.quantity = q; updateRow(entry); render({ stats: true });
+  try { await must(sb.from('collection').update({ quantity: q }).eq('id', id)); }
+  catch (err) { entry.quantity = old; updateRow(entry); render({ stats: true }); toast('Save failed: ' + err.message); }
 });
-$('#tbody').addEventListener('click', async e => {
+$('#tbody').addEventListener('click', e => {
   const pb = e.target.closest('.printing');
   if (pb) { openPrintings(+pb.closest('tr').dataset.id); return; }
   if (!e.target.classList.contains('del')) return;
   const id = +e.target.closest('tr').dataset.id, entry = state.entries.find(x => x.id === id);
-  if (!entry || !confirm(`Remove ${state.cards.get(entry.card_id).name} from your collection?`)) return;
-  try {
-    await must(sb.from('collection').delete().eq('id', id));
-    state.entries = state.entries.filter(x => x.id !== id); render();
-  } catch (err) { toast('Delete failed: ' + err.message); }
+  if (entry && confirm(`Remove ${state.cards.get(entry.card_id).name} from your collection?`)) removeEntry(entry);
 });
 
 // hover preview
@@ -408,6 +476,7 @@ $('#refreshBtn').addEventListener('click', async () => {
 
 // ---------- change printing ----------
 const modal = { entry: null, prints: [], finish: 'nonfoil', busy: false };
+const printCache = new Map();   // printings per card, kept for this visit
 const FIN_KEY = { nonfoil: '', foil: '_foil', etched: '_etched' };
 
 async function openPrintings(entryId) {
@@ -422,7 +491,15 @@ async function openPrintings(entryId) {
   renderFinishSeg();
   $('#modal').hidden = false; pv.style.display = 'none';
   try {
-    modal.prints = await sf.printings(card);
+    const key = card.oracle_id || card.name;
+    if (printCache.has(key)) modal.prints = printCache.get(key);
+    else {
+      modal.prints = await sf.printings(card, page => {         // show results as each page arrives
+        if (modal.entry !== entry) return;
+        modal.prints = page; $('#mStatus').textContent = `Loading… ${page.length} printings so far`; renderPrints();
+      });
+      printCache.set(key, modal.prints);
+    }
     if (modal.entry !== entry) return;               // closed / reopened meanwhile
     if (!modal.prints.length) { $('#mStatus').textContent = "Scryfall didn't return any printings for this card."; return; }
     $('#mStatus').textContent = `${modal.prints.length} printing${modal.prints.length === 1 ? '' : 's'}. Click one to switch to it.`;
@@ -488,27 +565,33 @@ $('#mList').addEventListener('click', async e => {
 async function changePrinting(entry, p, finish) {
   const today = todayUTC();
   const row = { ...cardRow(p), alt_id: null, alt_note: null };
+  const cardRows = [], priceRows = [priceRow(p, today)];
   if (!hasAllPrices(p.prices)) {                          // e.g. a List card: price it from the original printing
     const a = (await findAlts([p], sf)).get(p.id);
-    if (a) {
-      await must(sb.from('cards').upsert(cardRow(a.alt), { onConflict: 'id' }));
-      await must(sb.from('price_history').upsert(priceRow(a.alt, today), { onConflict: 'card_id,date' }));
+    if (a && a.alt.id !== p.id) {
+      cardRows.push({ ...cardRow(a.alt), alt_id: null, alt_note: null }); priceRows.push(priceRow(a.alt, today));
       row.alt_id = a.alt.id; row.alt_note = a.note;
     }
   }
-  await must(sb.from('cards').upsert(row, { onConflict: 'id' }));
-  await must(sb.from('price_history').upsert(priceRow(p, today), { onConflict: 'card_id,date' }));
+  cardRows.push(row);
+  await must(sb.from('cards').upsert(cardRows, { onConflict: 'id' }));   // one request; alternate printing first
 
   // already own that printing + finish? merge the quantities into one row
   const dupe = state.entries.find(e => e.id !== entry.id && e.card_id === p.id && e.finish === finish);
+  const saves = [must(sb.from('price_history').upsert(priceRows, { onConflict: 'card_id,date' }))];
   if (dupe) {
-    await must(sb.from('collection').update({ quantity: dupe.quantity + entry.quantity }).eq('id', dupe.id));
-    await must(sb.from('collection').delete().eq('id', entry.id));
+    saves.push(must(sb.from('collection').update({ quantity: dupe.quantity + entry.quantity }).eq('id', dupe.id)));
+    saves.push(must(sb.from('collection').delete().eq('id', entry.id)));
   } else {
-    await must(sb.from('collection').update({ card_id: p.id, finish }).eq('id', entry.id));
+    saves.push(must(sb.from('collection').update({ card_id: p.id, finish }).eq('id', entry.id)));
   }
-  state.cards.clear();
-  await loadAll();
+  await Promise.all(saves);
+
+  // update what's on screen without reloading everything
+  for (const r of cardRows) state.cards.set(r.id, r);
+  if (dupe) { dupe.quantity += entry.quantity; state.entries.splice(state.entries.indexOf(entry), 1); }
+  else { entry.card_id = p.id; entry.finish = finish; }
+  render({ stats: true, table: true });
 }
 
 // ---------- export ----------

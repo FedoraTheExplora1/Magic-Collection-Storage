@@ -104,6 +104,7 @@ td .del:hover{color:var(--bad)}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
   border-radius:10px;padding:10px 16px;display:none;z-index:60;box-shadow:0 8px 24px rgba(0,0,0,.5)}
 footer{margin-top:30px;color:var(--muted);font-size:12px}
+.more{color:var(--muted);font-size:12px;text-align:center;padding:14px}
 
 /* change printing */
 td .printing{background:none;border:1px solid transparent;padding:3px 6px;margin:-4px -7px;border-radius:6px;text-align:left;color:inherit}

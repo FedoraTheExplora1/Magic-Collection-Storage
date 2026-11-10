@@ -6,6 +6,13 @@
 <title>Magic Collection</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='3' width='20' height='26' rx='3' fill='%23d9a441'/%3E%3Crect x='9' y='6' width='14' height='11' rx='1.5' fill='%230e1014'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
+<!-- start fetching scripts and connections in parallel instead of one after another -->
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://api.scryfall.com" crossorigin>
+<link rel="modulepreload" href="app.js">
+<link rel="modulepreload" href="config.js">
+<link rel="modulepreload" href="js/core.js">
+<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/+esm" crossorigin>
 </head>
 <body>
 
@@ -107,6 +114,7 @@
         <tbody id="tbody"></tbody>
       </table>
     </div>
+    <div id="more" class="more" hidden></div>
     <div id="emptyMsg" class="empty" hidden>Your collection is empty. Open <strong>Add cards</strong> above to import a CSV.</div>
 
     <footer>

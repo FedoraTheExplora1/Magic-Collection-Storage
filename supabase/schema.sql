@@ -112,3 +112,37 @@ grant select, insert, update, delete  on public.collection to authenticated;
 grant usage, select on all sequences in schema public to authenticated;
 grant all on public.cards, public.collection, public.price_history, public.fx_rates, public.value_snapshots to service_role;
 grant usage, select on all sequences in schema public to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Fast loading: everything the website needs in ONE request
+-- (your collection, its cards, last week's prices, value history, exchange rate)
+-- ---------------------------------------------------------------------------
+create or replace function public.collection_snapshot()
+returns json
+language sql stable security invoker set search_path = public
+as $$
+  with mine as (
+    select id, card_id, finish, quantity, added_at from collection where user_id = (select auth.uid())
+  ),
+  ids as (
+    select card_id as id from mine
+    union
+    select c.alt_id from cards c join mine m on m.card_id = c.id where c.alt_id is not null
+  ),
+  past as (
+    select coalesce(
+      (select max(date) from price_history where date <= current_date - 7),
+      (select min(date) from price_history where date < current_date)
+    ) as d
+  )
+  select json_build_object(
+    'entries',   coalesce((select json_agg(m order by m.id) from mine m), '[]'::json),
+    'cards',     coalesce((select json_agg(c) from cards c where c.id in (select id from ids)), '[]'::json),
+    'past_date', (select d from past),
+    'past',      coalesce((select json_agg(p) from price_history p where p.date = (select d from past) and p.card_id in (select id from ids)), '[]'::json),
+    'snapshots', coalesce((select json_agg(s order by s.date) from (select date, value_usd, value_eur, value_aud, card_count from value_snapshots where user_id = (select auth.uid())) s), '[]'::json),
+    'fx',        (select row_to_json(f) from (select date, aud_per_usd from fx_rates order by date desc limit 1) f)
+  );
+$$;
+revoke execute on function public.collection_snapshot() from public, anon;
+grant execute on function public.collection_snapshot() to authenticated;
