@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Magic Collection</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='3' width='20' height='26' rx='3' fill='%23d9a441'/%3E%3Crect x='9' y='6' width='14' height='11' rx='1.5' fill='%230e1014'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Setup needed -->
+<div id="setupView" class="center-view" hidden>
+  <div class="panel narrow">
+    <h1>MTG <span>Collection</span></h1>
+    <p>This site isn't connected to a database yet. Open <code>config.js</code> and paste in your Supabase project URL and anon/publishable key (README step 3), then reload.</p>
+  </div>
+</div>
+
+<!-- Login -->
+<div id="loginView" class="center-view" hidden>
+  <form class="panel narrow" id="loginForm">
+    <h1>MTG <span>Collection</span></h1>
+    <p class="muted">Sign in to see your collection.</p>
+    <label class="small" for="email">Email</label>
+    <input type="email" id="email" autocomplete="username" required>
+    <label class="small" for="password">Password</label>
+    <input type="password" id="password" autocomplete="current-password" required>
+    <button class="primary wide" type="submit" id="loginBtn">Sign in</button>
+    <div id="loginErr" class="err"></div>
+  </form>
+</div>
+
+<!-- App -->
+<div id="appView" hidden>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>MTG <span>Collection</span></h1>
+        <div class="sub" id="lastUpdated">Loading…</div>
+      </div>
+      <div class="row">
+        <select id="currency" title="Currency">
+          <option value="AUD">AUD</option>
+          <option value="USD">USD (TCGplayer)</option>
+          <option value="EUR">EUR (Cardmarket)</option>
+        </select>
+        <button id="refreshBtn" title="Fetch today's prices from Scryfall for every card you own">Refresh prices</button>
+        <button id="signOutBtn" title="Sign out">Sign out</button>
+      </div>
+    </header>
+
+    <div class="stats">
+      <div class="stat big"><div class="k">Collection value</div><div class="v" id="sTotal">–</div></div>
+      <div class="stat"><div class="k" id="sChangeLabel">Change</div><div class="v" id="sChange">–</div></div>
+      <div class="stat"><div class="k">Cards</div><div class="v" id="sCards">–</div></div>
+      <div class="stat"><div class="k">Unique printings</div><div class="v" id="sUnique">–</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Value over time</h2>
+        <span class="note" id="chartNote"></span>
+      </div>
+      <div id="chart"></div>
+    </div>
+
+    <details class="panel" id="importPanel">
+      <summary><h2>Add cards</h2><span class="note">Upload a CSV or paste a list</span></summary>
+      <div class="grid2" style="margin-top:14px">
+        <div>
+          <div class="drop" id="drop">
+            <strong>Drop a .csv here or click to choose</strong>
+            <div class="hint">Moxfield, Archidekt, ManaBox, Deckbox, Dragon Shield, TCGplayer, or any CSV with a card name column</div>
+            <input type="file" id="file" accept=".csv,.txt,text/csv,text/plain" hidden>
+          </div>
+        </div>
+        <div>
+          <textarea id="paste" placeholder="4 Lightning Bolt&#10;1 Sol Ring (C21) 263&#10;1 The One Ring (LTR) 246 *F*&#10;1 Shivan Fire (PLST) DOM-142"></textarea>
+        </div>
+      </div>
+      <div class="row import-row">
+        <label class="row"><input type="radio" name="mode" value="add" checked> Add to my collection</label>
+        <label class="row"><input type="radio" name="mode" value="replace"> Replace my whole collection with this list</label>
+        <span class="spacer"></span>
+        <button class="primary" id="importBtn">Import pasted list</button>
+      </div>
+      <div class="progress" id="progress"><div></div></div>
+      <div id="importStatus" class="status"></div>
+      <div id="importResult"></div>
+    </details>
+
+    <div class="toolbar">
+      <input type="search" id="filter" placeholder="Filter by card or set…">
+      <div class="row">
+        <label class="row small-check" title="e.g. a List card numbered DOM-142 with no price uses Dominaria #142's price. Other cards with no price use the cheapest printing that has one.">
+          <input type="checkbox" id="useAlt" checked> Price unpriced cards from another printing
+        </label>
+        <button id="copyBtn">Copy CSV</button>
+        <button id="exportBtn">Download CSV</button>
+      </div>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr id="thead"></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div id="emptyMsg" class="empty" hidden>Your collection is empty. Open <strong>Add cards</strong> above to import a CSV.</div>
+
+    <footer>
+      Prices and images from <a href="https://scryfall.com" target="_blank" rel="noopener">Scryfall</a>, updated daily.
+      USD is TCGplayer market price, EUR is Cardmarket trend, AUD is USD × the daily exchange rate (<span id="rateText">…</span>),
+      so it won't exactly match Australian store prices. Hover a row to see the card.
+    </footer>
+  </div>
+</div>
+
+<img id="preview" alt="">
+<div id="toast"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

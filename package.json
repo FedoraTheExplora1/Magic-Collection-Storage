@@ -1,0 +1,13 @@
+{
+  "name": "magic-collection-storage",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal Magic: The Gathering collection tracker with daily Scryfall prices",
+  "scripts": {
+    "update-prices": "node scripts/update-prices.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}
