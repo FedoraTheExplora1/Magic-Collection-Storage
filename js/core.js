@@ -202,7 +202,22 @@ export function makeScryfall({ headers = { Accept: 'application/json' }, delay =
     return list.find(c => c.prices && c.prices.usd != null) || list.find(c => hasAnyPrice(c.prices)) || null;
   }
 
-  return { req, collection, fuzzy, cheapestOther, keyOf };
+  // Every paper printing of a card, newest first (follows Scryfall's pagination)
+  async function printings(card) {
+    const oid = card.oracle_id || (card.card_faces && card.card_faces[0] && card.card_faces[0].oracle_id);
+    const q = oid ? `oracleid:${oid} include:extras game:paper` : `!"${card.name}" include:extras game:paper`;
+    let url = API + '/cards/search?unique=prints&order=released&dir=desc&q=' + encodeURIComponent(q), out = [];
+    for (let page = 0; url && page < 8; page++) {
+      const r = await req(url);
+      if (!r.ok) break;
+      const j = await r.json();
+      out = out.concat(j.data || []);
+      url = j.has_more ? j.next_page : null;
+    }
+    return out;
+  }
+
+  return { req, collection, fuzzy, cheapestOther, printings, keyOf };
 }
 
 // For printings with no price: List cards ("DOM-142") -> original printing; otherwise cheapest other printing.

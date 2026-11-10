@@ -190,7 +190,7 @@ function render() {
     return `<tr data-id="${e.id}" data-img="${esc(c.image_url || '')}">
       <td class="num"><input class="qty" type="number" min="0" value="${e.quantity}" title="Change quantity (0 removes it)"></td>
       <td class="name"><span class="dot r-${esc(c.rarity)}"></span><a href="${esc(c.scryfall_uri)}" target="_blank" rel="noopener">${esc(c.name)}</a></td>
-      <td>${esc((c.set_code || '').toUpperCase())} <span class="muted">${esc(c.set_name)}</span></td>
+      <td><button class="printing" title="Change printing or finish">${esc((c.set_code || '').toUpperCase())} <span class="muted">${esc(c.set_name)}</span><span class="pen">✎</span></button></td>
       <td class="muted">${esc(c.collector_number)}</td>
       <td>${e.finish === 'nonfoil' ? '<span class="badge">normal</span>' : `<span class="badge ${e.finish}">${e.finish}</span>`}</td>
       <td class="num">${money(r.unit)}${notes}</td>
@@ -277,6 +277,8 @@ $('#tbody').addEventListener('change', async e => {
   } catch (err) { toast('Save failed: ' + err.message); e.target.value = entry.quantity; }
 });
 $('#tbody').addEventListener('click', async e => {
+  const pb = e.target.closest('.printing');
+  if (pb) { openPrintings(+pb.closest('tr').dataset.id); return; }
   if (!e.target.classList.contains('del')) return;
   const id = +e.target.closest('tr').dataset.id, entry = state.entries.find(x => x.id === id);
   if (!entry || !confirm(`Remove ${state.cards.get(entry.card_id).name} from your collection?`)) return;
@@ -403,6 +405,111 @@ $('#refreshBtn').addEventListener('click', async () => {
   } catch (e) { console.error(e); toast('Refresh failed: ' + (e.message || e)); }
   finally { setBusy(false); $('#refreshBtn').textContent = 'Refresh prices'; }
 });
+
+// ---------- change printing ----------
+const modal = { entry: null, prints: [], finish: 'nonfoil', busy: false };
+const FIN_KEY = { nonfoil: '', foil: '_foil', etched: '_etched' };
+
+async function openPrintings(entryId) {
+  const entry = state.entries.find(e => e.id === entryId); if (!entry || state.busy) return;
+  const card = state.cards.get(entry.card_id);
+  Object.assign(modal, { entry, prints: [], finish: entry.finish, busy: false });
+  $('#mTitle').textContent = card.name;
+  $('#mSub').textContent = `You have ${entry.quantity} × ${(card.set_code || '').toUpperCase()} #${card.collector_number} (${entry.finish === 'nonfoil' ? 'normal' : entry.finish}). Pick the printing you actually own.`;
+  $('#mFilter').value = '';
+  $('#mList').innerHTML = '';
+  $('#mStatus').textContent = 'Loading printings from Scryfall…'; $('#mStatus').className = 'status';
+  renderFinishSeg();
+  $('#modal').hidden = false; pv.style.display = 'none';
+  try {
+    modal.prints = await sf.printings(card);
+    if (modal.entry !== entry) return;               // closed / reopened meanwhile
+    if (!modal.prints.length) { $('#mStatus').textContent = "Scryfall didn't return any printings for this card."; return; }
+    $('#mStatus').textContent = `${modal.prints.length} printing${modal.prints.length === 1 ? '' : 's'}. Click one to switch to it.`;
+    renderPrints();
+    $('#mFilter').focus();
+  } catch (e) { $('#mStatus').textContent = 'Could not load printings: ' + (e.message || e); $('#mStatus').className = 'status err'; }
+}
+
+function renderFinishSeg() {
+  for (const b of $('#mFinish').children) b.classList.toggle('on', b.dataset.f === modal.finish);
+}
+
+function renderPrints() {
+  const f = $('#mFilter').value.trim().toLowerCase(), cur = modal.entry && modal.entry.card_id;
+  const conv = v => state.currency === 'AUD' ? v * (state.rate || 0) : v;
+  const b = base();
+  const html = modal.prints.map((p, i) => {
+    const year = (p.released_at || '').slice(0, 4);
+    if (f && !`${p.set} ${p.set_name} ${year} ${p.collector_number}`.toLowerCase().includes(f)) return '';
+    const fins = p.finishes || ['nonfoil'];
+    const price = Object.entries(FIN_KEY).filter(([fin]) => fins.includes(fin)).map(([fin, suf]) => {
+      const v = p.prices && p.prices[b + suf];
+      return `${fin === 'nonfoil' ? 'normal' : fin} ${v != null ? money(conv(+v)) : '—'}`;
+    }).join(' · ');
+    const img = (p.image_uris && p.image_uris.small) || (p.card_faces && p.card_faces[0].image_uris && p.card_faces[0].image_uris.small) || '';
+    return `<button class="print${p.id === cur ? ' current' : ''}${fins.includes(modal.finish) ? '' : ' nofinish'}" data-i="${i}" title="${esc(p.set_name)} #${esc(p.collector_number)}">
+      <img loading="lazy" src="${esc(img)}" alt="">
+      <span class="pm"><strong>${esc(p.set.toUpperCase())} #${esc(p.collector_number)}</strong>
+        <span class="sn">${esc(p.set_name)}${year ? ' · ' + year : ''}</span>
+        <span class="pr">${price}</span>
+        ${p.id === cur ? '<span class="tag">current</span>' : ''}${fins.includes(modal.finish) ? '' : `<span class="tag">no ${modal.finish} version</span>`}</span>
+    </button>`;
+  }).join('');
+  $('#mList').innerHTML = html || '<div class="empty">No printings match that filter.</div>';
+}
+
+function closeModal() { $('#modal').hidden = true; modal.entry = null; }
+$('#mClose').addEventListener('click', closeModal);
+$('#modal').addEventListener('click', e => { if (e.target.id === 'modal' && !modal.busy) closeModal(); });
+addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#modal').hidden && !modal.busy) closeModal(); });
+$('#mFilter').addEventListener('input', renderPrints);
+$('#mFinish').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  modal.finish = b.dataset.f; renderFinishSeg(); renderPrints();
+});
+$('#mList').addEventListener('click', async e => {
+  const b = e.target.closest('.print'); if (!b || modal.busy) return;
+  const p = modal.prints[+b.dataset.i], entry = modal.entry;
+  const fins = p.finishes || ['nonfoil'];
+  const finish = fins.includes(modal.finish) ? modal.finish : fins[0];
+  if (p.id === entry.card_id && finish === entry.finish) { closeModal(); return; }
+  modal.busy = true; $('#mStatus').className = 'status'; $('#mStatus').textContent = 'Saving…';
+  try {
+    await changePrinting(entry, p, finish);
+    closeModal();
+    toast(`Switched to ${p.set.toUpperCase()} #${p.collector_number}` + (finish !== modal.finish ? ` (${finish}: that printing has no ${modal.finish} version)` : '') + '.');
+  } catch (err) {
+    console.error(err);
+    $('#mStatus').textContent = 'Save failed: ' + (err.message || err); $('#mStatus').className = 'status err';
+  } finally { modal.busy = false; }
+});
+
+async function changePrinting(entry, p, finish) {
+  const today = todayUTC();
+  const row = { ...cardRow(p), alt_id: null, alt_note: null };
+  if (!hasAllPrices(p.prices)) {                          // e.g. a List card: price it from the original printing
+    const a = (await findAlts([p], sf)).get(p.id);
+    if (a) {
+      await must(sb.from('cards').upsert(cardRow(a.alt), { onConflict: 'id' }));
+      await must(sb.from('price_history').upsert(priceRow(a.alt, today), { onConflict: 'card_id,date' }));
+      row.alt_id = a.alt.id; row.alt_note = a.note;
+    }
+  }
+  await must(sb.from('cards').upsert(row, { onConflict: 'id' }));
+  await must(sb.from('price_history').upsert(priceRow(p, today), { onConflict: 'card_id,date' }));
+
+  // already own that printing + finish? merge the quantities into one row
+  const dupe = state.entries.find(e => e.id !== entry.id && e.card_id === p.id && e.finish === finish);
+  if (dupe) {
+    await must(sb.from('collection').update({ quantity: dupe.quantity + entry.quantity }).eq('id', dupe.id));
+    await must(sb.from('collection').delete().eq('id', entry.id));
+  } else {
+    await must(sb.from('collection').update({ card_id: p.id, finish }).eq('id', entry.id));
+  }
+  state.cards.clear();
+  await loadAll();
+}
 
 // ---------- export ----------
 function toCSV() {
