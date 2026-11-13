@@ -3,8 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#08090a">
 <title>Magic Collection</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='3' width='20' height='26' rx='3' fill='%23d9a441'/%3E%3Crect x='9' y='6' width='14' height='11' rx='1.5' fill='%230e1014'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='3' width='20' height='26' rx='4' fill='%2308090a' stroke='%23383b3f'/%3E%3Crect x='10' y='8' width='12' height='9' rx='2' fill='%23e4f222'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://rsms.me">
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="style.css">
 <!-- start fetching scripts and connections in parallel instead of one after another -->
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
@@ -19,7 +25,7 @@
 <!-- Setup needed -->
 <div id="setupView" class="center-view" hidden>
   <div class="panel narrow">
-    <h1>MTG <span>Collection</span></h1>
+    <h1 class="brand"><span class="mark"></span>Collection</h1>
     <p>This site isn't connected to a database yet. Open <code>config.js</code> and paste in your Supabase project URL and anon/publishable key (README step 3), then reload.</p>
   </div>
 </div>
@@ -27,7 +33,7 @@
 <!-- Login -->
 <div id="loginView" class="center-view" hidden>
   <form class="panel narrow" id="loginForm">
-    <h1>MTG <span>Collection</span></h1>
+    <h1 class="brand"><span class="mark"></span>Collection</h1>
     <p class="muted">Sign in to see your collection.</p>
     <label class="small" for="email">Email</label>
     <input type="email" id="email" autocomplete="username" required>
@@ -43,7 +49,7 @@
   <div class="wrap">
     <header>
       <div>
-        <h1>MTG <span>Collection</span></h1>
+        <h1 class="brand"><span class="mark"></span>Collection</h1>
         <div class="sub" id="lastUpdated">Loading…</div>
       </div>
       <div class="row">
@@ -57,6 +63,12 @@
       </div>
     </header>
 
+    <nav class="tabs" id="tabs" role="tablist">
+      <a href="#collection" class="tab" data-view="collection" role="tab">Collection <span class="count" id="tabCountCollection"></span></a>
+      <a href="#sets" class="tab" data-view="sets" role="tab">Sets <span class="count" id="tabCountSets"></span></a>
+      <a href="#movers" class="tab" data-view="movers" role="tab">Movers</a>
+    </nav>
+
     <div class="stats">
       <div class="stat big"><div class="k">Collection value</div><div class="v" id="sTotal">–</div></div>
       <div class="stat"><div class="k" id="sChangeLabel">Change</div><div class="v" id="sChange">–</div></div>
@@ -64,6 +76,7 @@
       <div class="stat"><div class="k">Unique printings</div><div class="v" id="sUnique">–</div></div>
     </div>
 
+    <section id="view-collection">
     <div class="panel">
       <div class="panel-head">
         <h2>Value over time</h2>
@@ -116,6 +129,47 @@
     </div>
     <div id="more" class="more" hidden></div>
     <div id="emptyMsg" class="empty" hidden>Your collection is empty. Open <strong>Add cards</strong> above to import a CSV.</div>
+    </section>
+
+    <!-- Sets view -->
+    <section id="view-sets" hidden>
+      <div class="toolbar first">
+        <input type="search" id="setFilter" placeholder="Filter sets or cards…">
+        <div class="row">
+          <span class="note">Sort</span>
+          <select id="setSort">
+            <option value="value">Value</option>
+            <option value="cards">Cards owned</option>
+            <option value="name">Set name</option>
+            <option value="code">Set code</option>
+          </select>
+          <button id="setExpand">Expand all</button>
+        </div>
+      </div>
+      <div id="setList" class="setlist"></div>
+    </section>
+
+    <!-- Movers view -->
+    <section id="view-movers" hidden>
+      <div class="toolbar first">
+        <div class="row">
+          <div class="seg" id="mvPeriod" title="Compare today's prices with…">
+            <button data-v="1">1 day</button><button data-v="7">7 days</button><button data-v="30">30 days</button><button data-v="all">All time</button>
+          </div>
+          <div class="seg" id="mvMode">
+            <button data-v="unit" title="Change in the price of one copy">Per card</button><button data-v="holding" title="Change in value × the number you own">My holding</button>
+          </div>
+          <div class="seg" id="mvUnit">
+            <button data-v="abs">$</button><button data-v="pct">%</button>
+          </div>
+        </div>
+        <span class="note" id="mvNote"></span>
+      </div>
+      <div class="grid2 movers">
+        <div class="panel"><div class="panel-head"><h2>Biggest gains</h2><span class="note" id="mvUpCount"></span></div><ol class="mvlist" id="mvUp"></ol></div>
+        <div class="panel"><div class="panel-head"><h2>Biggest drops</h2><span class="note" id="mvDownCount"></span></div><ol class="mvlist" id="mvDown"></ol></div>
+      </div>
+    </section>
 
     <footer>
       Prices and images from <a href="https://scryfall.com" target="_blank" rel="noopener">Scryfall</a>, updated daily.
